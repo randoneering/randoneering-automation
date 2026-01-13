@@ -1,0 +1,38 @@
+# Please open a PR when making changes to this yml file.
+environments:
+  prod:
+    account_id: ""
+    region: "us-east-1"
+    subnet_group: ""
+    hosted_zone_id: ""
+    domain_name: ""
+    vpc: ""
+
+engines:
+  - "aurora-mysql"
+  - "aurora-postgresql"
+  - "mysql"
+  - "postgres"
+
+engine_versions:
+  aurora-mysql:
+    - "8.0.mysql_aurora.3.08.2"
+    - "8.0.mysql_aurora.3.09.0"
+    - "8.0.mysql_aurora.3.10.0"
+  aurora-postgresql:
+    - "16.8"
+    - "17.4"
+  mysql:
+    - "8.0.42"
+  postgres:
+    - "16.8"
+    - "17.4"
+
+instance_classes:
+  # Burstable
+  - "db.t4g.medium"
+  - "db.t4g.large"
+  # Memory Optimized
+  - "db.r7g.large"
+  - "db.r7g.2xlarge"
+  - "db.r7g.4xlarge"

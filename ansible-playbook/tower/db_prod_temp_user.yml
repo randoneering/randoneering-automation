@@ -1,0 +1,174 @@
+---
+- name: Temp user for production writes
+  hosts: all
+  tasks:
+    - name: Generate password tempuser_rw
+      ansible.builtin.set_fact:
+        user_rw_pass: "{{ lookup('community.general.random_string', special=false, numbers=true, length=20) }}"
+      no_log: true
+
+    - name: Create temp user for mysql (query method)
+      community.mysql.mysql_query:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        query:
+          - SET @user_count = (SELECT COUNT(*) FROM mysql.user WHERE user like 'tempuser%' and host = '{{ item.host }}');
+          - SET @username = IF(@user_count = 0, CONCAT('tempuser_rw@','''{{ item.host }}'''), CONCAT('tempuser',@user_count + 1,'_rw','@','''{{ item.host }}'''));
+          - SET @create_user = CONCAT("CREATE USER IF NOT EXISTS"," ",@username," ","IDENTIFIED by"," ","'{{ user_rw_pass }}'");
+          - SET @grant_usage = CONCAT("GRANT USAGE on *.* to"," ",@username);
+          - SET @grant_rights = CONCAT("GRANT SELECT, INSERT, UPDATE, DELETE, CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, SHOW VIEW on `{{ database }}`.* to"," ",@username);
+          - prepare create_tempuser from @create_user;
+          - execute create_tempuser;
+          - prepare grant_usage from @grant_usage;
+          - execute grant_usage;
+          - prepare grant_rights from @grant_rights;
+          - execute grant_rights;
+          - select @username as username;
+      with_items:
+        - { host: "172.%" }
+        - { host: "10.%" }
+      when: db_type == "mysql"
+      register: mysql_results
+
+    - name: Query mysql_results for username created
+      set_fact:
+        temp_user: "{{ mysql_results | json_query('results[0].query_result[11][0].username')}}"
+      when: db_type == "mysql"
+
+    - name: Extract temp username
+      set_fact:
+        temp_username: "{{ temp_user | regex_replace('@.*', '') }}"
+      when: db_type == "mysql"
+
+    - name: Check if tracking proc exists (shim preferred) [MySQL]
+      community.mysql.mysql_query:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        query:
+          - |
+            SELECT CASE
+              WHEN EXISTS (
+                SELECT 1 FROM information_schema.routines
+                WHERE routine_schema='tracking'
+                  AND routine_name='log_login_shim'
+                  AND routine_type='PROCEDURE'
+              ) THEN 'log_login_shim'
+              WHEN EXISTS (
+                SELECT 1 FROM information_schema.routines
+                WHERE routine_schema='tracking'
+                  AND routine_name='log_login'
+                  AND routine_type='PROCEDURE'
+              ) THEN 'log_login'
+              ELSE NULL
+            END AS proc_name
+      when: db_type == "mysql"
+      register: mysql_proc_check
+      failed_when: false
+
+    - name: Set detected proc name (empty if none)
+      ansible.builtin.set_fact:
+        login_proc: "{{ (mysql_proc_check.query_result[0][0].proc_name | default('')) if (mysql_proc_check.query_result|length>0 and mysql_proc_check.query_result[0]|length>0) else '' }}"
+      when: db_type == "mysql"
+
+    - name: Fetch host entries for temp user (so we can grant to 'user'@'host')
+      community.mysql.mysql_query:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        query:
+          - "SELECT host FROM mysql.user WHERE user = '{{ temp_username }}'"
+      when:
+        - db_type == "mysql"
+        - login_proc != ""
+      register: mysql_user_hosts
+      failed_when: false
+
+    - name: Grant EXECUTE on tracking proc to target user
+      community.mysql.mysql_query:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        query: >-
+          GRANT EXECUTE ON PROCEDURE tracking.{{ login_proc }}
+          TO '{{ temp_username }}'@'{{ item }}'
+      loop:
+        - "172.%"
+        - "10.%"
+      when:
+        - db_type == "mysql"
+        - login_proc
+      changed_when: true
+
+    - name: Note if EXECUTE grant skipped (proc not present)
+      ansible.builtin.debug:
+        msg: "Skipping EXECUTE grant: tracking.log_login[_shim] not present on {{ db_host }}"
+      when:
+        - db_type == "mysql"
+        - login_proc == ""
+
+    - name: Create tempuser_rw for Postgres
+      community.postgresql.postgresql_query:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ database }}"
+        query:
+          - CREATE OR REPLACE FUNCTION create_tempuser()
+            RETURNS TEXT AS $$
+            DECLARE
+            user_count INTEGER;
+            username TEXT;
+            BEGIN
+            user_count := (SELECT COUNT(*) FROM pg_user WHERE usename LIKE 'tempuser%');
+            username := CASE user_count WHEN 0 THEN 'tempuser_rw' ELSE 'tempuser' || user_count + 1 || '_rw' END;
+            EXECUTE format('CREATE USER %I WITH PASSWORD ''{{ user_rw_pass }}''', username);
+            EXECUTE format('GRANT readwrite TO %I', username);
+            RETURN username;
+            END; $$
+            LANGUAGE plpgsql;
+          - select create_tempuser();
+      when: db_type == "postgres"
+      register: postgres_results
+
+    - name: Query Results for Username
+      set_fact:
+        temp_username: "{{ postgres_results | json_query('query_result[0].create_tempuser')}}"
+      when: db_type == "postgres"
+
+    - name: Create tempuser for documentDB
+      community.mongodb.mongodb_shell:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        login_port: 27017
+        ssl: true
+        ssl_ca_certs: /mnt/datadogfiles/global-bundle.pem
+        stringify: false
+        eval: |
+          function createTempUser(password,database) {
+            let count = '1';
+            while (db.getUser(`tempuser_rw${count}`) != null) {
+              count++;
+            }
+            const tempuserName = `tempuser_rw${count}`
+            db.createUser({
+              "user": tempuserName,
+              "pwd": password,
+              "roles": [{ role: "readWrite", db: database }]
+            });
+            return tempuserName;
+          };
+          createTempUser("{{ user_rw_pass }}","{{ database }}")
+      when: db_type == "mongodb"
+      register: docdb_results
+
+    - name: debug
+      ansible.builtin.debug:
+        var: docdb_results
+
+    - name: Query Results for Username
+      set_fact:
+        temp_username: "{{ docdb_results | json_query('transformed_output[0]')}}"
+      when: db_type == "mongodb"

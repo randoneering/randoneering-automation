@@ -1,0 +1,148 @@
+---
+- name: Playbook to create users for mysql, postgres, and mongodb (docdb)
+  hosts: all
+  tasks:
+    - name: generate password for target user
+      ansible.builtin.set_fact:
+        target_user_pass: "{{ lookup('community.general.random_string', special=false, numbers=true, length=20) }}"
+      no_log: true
+
+    - name: create read only user (mysql)
+      community.mysql.mysql_user:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        name: "{{ target_username }}"
+        host: "{{ item.host }}"
+        password: "{{ target_user_pass }}"
+        priv: "{{ database }}.*: USAGE/{{ database }}.*: SELECT, SHOW VIEW"
+      with_items:
+        - { host: "172.%" } # Change for hosts
+        - { host: "10.%" }
+        - { host: "192.%" }
+      when:
+        - db_type == "mysql"
+        - grant_type == "readonly"
+
+    - name: create readwrite user (mysql)
+      community.mysql.mysql_user:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username  }}"
+        login_password: "{{ db_password }}"
+        name: "{{ target_username }}"
+        host: "{{ item.host }}"
+        password: "{{ target_user_pass }}"
+        priv: "{{ database }}.*: USAGE/{{ database }}.*: SELECT, INSERT, UPDATE, DELETE, CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, SHOW VIEW"
+      with_items:
+        - { host: "172.%" }
+        - { host: "10.%" }
+        - { host: "192.%" }
+      when:
+        - db_type == "mysql"
+        - grant_type == "readwrite"
+
+    - name: create postgres user (RO)
+      community.postgresql.postgresql_user:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ database }}"
+        name: "{{ target_username }}"
+        password: "{{ target_user_pass }}"
+      when:
+        - db_type == "postgres"
+        - grant_type == "readonly"
+
+    - name: create postgres user (RW)
+      community.postgresql.postgresql_user:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ database }}"
+        name: "{{ target_username }}"
+        password: "{{ target_user_pass }}"
+      when:
+        - db_type == "postgres"
+        - grant_type == "readwrite"
+
+    - name: create postgres user (ddl)
+      community.postgresql.postgresql_user:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ database }}"
+        name: "{{ target_username }}"
+        password: "{{ target_user_pass }}"
+      when:
+        - db_type == "postgres"
+        - grant_type == "ddl"
+
+    - name: grants for RO postgres user
+      community.postgresql.postgresql_membership:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ database }}"
+        group: readonly
+        target_role: "{{ target_username }}"
+      when:
+        - db_type == "postgres"
+        - grant_type == "readonly"
+
+    - name: grants for RW postgres user
+      community.postgresql.postgresql_membership:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ database }}"
+        group: readwrite
+        target_role: "{{ target_username }}"
+      when:
+        - db_type == "postgres"
+        - grant_type == "readwrite"
+
+    - name: grants for ddl postgres user
+      community.postgresql.postgresql_membership:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ database }}"
+        group: ddl
+        target_role: "{{ target_username }}"
+      when:
+        - db_type == "postgres"
+        - grant_type == "ddl"
+
+    - name: Create read only user for MongoDB/DocDB
+      community.mongodb.mongodb_user:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        login_port: 27017
+        login_database: "admin"
+        ssl: true
+        ssl_ca_certs: ""
+        database: "{{ database}}"
+        name: "{{ target_username }}"
+        password: "{{ target_user_pass}}"
+        roles: read
+      when:
+        - db_type == "mongodb"
+        - grant_type == "readonly"
+
+    - name: Create readWrite user for MongoDB/DocDB
+      community.mongodb.mongodb_user:
+        login_host: "{{ db_host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        login_port: 27017
+        login_database: "admin"
+        ssl: true
+        ssl_ca_certs: ""
+        database: "{{ database }}"
+        name: "{{ target_username }}"
+        password: "{{ target_user_pass}}"
+        roles: readWrite
+      when:
+        - db_type == "mongodb"
+        - grant_type == "readwrite"

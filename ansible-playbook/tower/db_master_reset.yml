@@ -1,0 +1,83 @@
+---
+- name: reset master password on instances and clusters daily
+  hosts: all
+  tasks:
+    - name: connect to account
+      amazon.aws.sts_assume_role:
+        region: us-west-2
+        role_arn: ""
+        role_session_name: "admin_reset"
+      register: assumed_role
+
+    - name: get ss rds instance details
+      amazon.aws.rds_instance_info:
+        region: us-west-2
+        access_key: "{{ assumed_role.sts_creds.access_key }}"
+        secret_key: "{{ assumed_role.sts_creds.secret_key }}"
+        session_token: "{{ assumed_role.sts_creds.session_token }}"
+      register: instances
+
+    - name: get rds cluster details
+      amazon.aws.rds_cluster_info:
+        region: us-west-2
+        access_key: "{{ assumed_role.sts_creds.access_key }}"
+        secret_key: "{{ assumed_role.sts_creds.secret_key }}"
+        session_token: "{{ assumed_role.sts_creds.session_token }}"
+      register: clusters
+
+    - name: filter out stopped instances/clusters
+      ansible.builtin.set_fact:
+        instancse_check: "{{ instances.instances | selectattr('db_instance_status', 'eq', 'available') }}"
+        clusters_check: "{{ clusters.clusters | selectattr('status', 'eq', 'available') }}"
+
+    - name: set var for identifier for instances and clusters
+      ansible.builtin.set_fact:
+        instance_list: "{{ instances_check | selectattr('db_cluster_identifier', 'undefined') | map(attribute='db_instance_identifier') | list }}"
+        cluster_list: "{{ clusters_check | map(attribute='db_cluster_identifier') | list }}"
+
+    - name: generate RDS master password for instances
+      ansible.builtin.set_fact:
+        int_pass: "{{ lookup('community.general.random_string', special=false, numbers=true, length=20) }}"
+      with_items: "{{ instance_list }}"
+      loop_control:
+        index_var: instance_index
+      no_log: true
+
+    - name: generate RDS master password for clusters
+      ansible.builtin.set_fact:
+        cluster_pass: "{{ lookup('community.general.random_string', special=false, numbers=true, length=20) }}"
+      with_items: "{{ cluster_list }}"
+      loop_control:
+        index_var: cluster_index
+      no_log: true
+
+    - block:
+        - name: reset master/root password for clusters
+          amazon.aws.rds_cluster:
+            region: us-west-2
+            access_key: "{{ assumed_role.sts_creds.access_key }}"
+            secret_key: "{{ assumed_role.sts_creds.secret_key }}"
+            session_token: "{{ assumed_role.sts_creds.session_token }}"
+            id: "{{ item }}"
+            state: present
+            force_update_password: true
+            master_user_password: "{{ cluster_pass }}"
+            apply_immediately: true
+          with_items: "{{ cluster_list }}"
+          when: cluster_list is defined
+
+        - name: reset master/root password for instances
+          amazon.aws.rds_instance:
+            region: us-west-2
+            access_key: "{{ assumed_role.sts_creds.access_key }}"
+            secret_key: "{{ assumed_role.sts_creds.secret_key }}"
+            session_token: "{{ assumed_role.sts_creds.session_token }}"
+            id: "{{ item }}"
+            state: present
+            force_update_password: true
+            master_user_password: "{{ int_pass }}"
+            apply_immediately: true
+          with_items: "{{ instance_list }}"
+          when: instance_list is defined
+      rescue:
+        - name: send notification

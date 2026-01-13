@@ -1,0 +1,107 @@
+---
+- name: Deploy dba user to all endpoints
+  hosts: all
+  tasks:
+    - name: connect to prod
+      amazon.aws.sts_assume_role:
+        region: us-west-2
+        role_arn: ""
+        role_session_name: "deploy_dba"
+      register: assumed_role_prod
+
+    - name: get prod rds instance details
+      amazon.aws.rds_instance_info:
+        region: us-east-1
+        access_key: "{{ assumed_role_prod.sts_creds.access_key }}"
+        secret_key: "{{ assumed_role_prod.sts_creds.secret_key }}"
+        session_token: "{{ assumed_role_prod.sts_creds.session_token }}"
+      register: prod_instance
+
+    - name: keep non-Aurora, non-DocDB RDS instances
+      ansible.builtin.set_fact:
+        prod_instances: "{{ prod_instance.instances | selectattr('engine', 'search', '^(?!aurora|docdb)') }}"
+
+    - name: filter out stopped instances
+      ansible.builtin.set_fact:
+        prod_instances_avail: "{{ prod_instances | selectattr('db_instance_status', 'eq', 'available') }}"
+
+    - name: get prod rds cluster details
+      amazon.aws.rds_cluster_info:
+        region: us-west-2
+        access_key: "{{ assumed_role_prod.sts_creds.access_key }}"
+        secret_key: "{{ assumed_role_prod.sts_creds.secret_key }}"
+        session_token: "{{ assumed_role_prod.sts_creds.session_token }}"
+      register: prod_cluster
+
+    - name: filter out docdb in clusters
+      ansible.builtin.set_fact:
+        prod_clusters: "{{ prod_cluster.clusters | selectattr('engine', 'search', 'aurora') }}"
+
+    - name: filter out stopped clusters
+      ansible.builtin.set_fact:
+        prod_clusters_avail: "{{ prod_clusters | selectattr('status', 'eq', 'available') }}"
+
+    - name: Filter out engines
+      ansible.builtin.set_fact:
+        prod_postgres_instances: "{{ prod_instances_avail | selectattr('engine', 'search', 'postgres') }}"
+        prod_mysql_instances: "{{ prod_instances_avail | selectattr('engine', 'search', 'mysql') }}"
+        prod_postgres_clusters: "{{ prod_clusters_avail | selectattr('engine', 'search', 'aurora-postgresql') }}"
+        prod_mysql_clusters: "{{ prod_clusters_avail | selectattr('engine', 'search', 'aurora-mysql') }}"
+
+    - name: set var for identifier for prod instances and clusters
+      ansible.builtin.set_fact:
+        prod_pg_instance_endpoints: "{{ prod_postgres_instances | selectattr('db_cluster_identifier', 'undefined') | map(attribute='endpoint.address') | list  }}"
+        prod_pg_cluster_endpoints: "{{ prod_postgres_clusters | map(attribute='endpoint') | list }}"
+        prod_mysql_instance_endpoints: "{{ prod_mysql_instances | selectattr('db_cluster_identifier', 'undefined') | map(attribute='endpoint.address') | list  }}"
+        prod_mysql_cluster_endpoints: "{{ prod_mysql_clusters | map(attribute='endpoint') | list }}"
+
+    - name: combine engine endpoints into single variables
+      ansible.builtin.set_fact:
+        pg_list: "{{ (prod_pg_instance_endpoints + prod_pg_cluster_endpoints) }}"
+        mysql_list: "{{ (prod_mysql_instance_endpoints + prod_mysql_cluster_endpoints) }}"
+
+    - block:
+        - name: Deploy target dba user to postgres endpoints
+          community.postgresql.postgresql_query:
+            login_host: "{{ item }}"
+            login_user: "{{ db_username }}"
+            login_password: "{{ db_password }}"
+            db: postgres
+            query:
+              - do $block$
+                declare
+                _missing bool;
+                begin
+                select (count(*) filter (where rolname = '{{ target_user }}_dba')) = 0 into strict _missing from pg_roles;
+                if _missing then
+                CREATE USER "{{ target_user }}_dba" WITH PASSWORD '{{ password }}';
+                GRANT dba to "{{ target_user }}_dba";
+                ALTER USER "{{ target_user }}_dba"
+                createdb
+                createrole;
+                end if
+                ;
+                end;
+                $block$;
+          loop: "{{ pg_list }}"
+          when: pg_list is defined
+          register: prod_pg_list_output
+          no_log: true
+        - name: Deploy target dba user to mysql endpoints
+          community.mysql.mysql_query:
+            login_host: "{{ item }}"
+            login_user: "{{ db_username }}"
+            login_password: "{{ db_password }}"
+            query:
+              - CREATE USER IF NOT EXISTS '{{ target_user }}_dba'@'172.%' IDENTIFIED BY '{{ password }}';
+              - grant alter, alter routine, create, create routine, create temporary tables, create user, create view, delete, drop, event, execute, index, insert, lock tables, process, references, reload, select, show databases, show view, trigger, update on *.* to '{{ target_user }}_dba'@'172.%' WITH GRANT OPTION;
+              - CREATE USER IF NOT EXISTS '{{ target_user }}_dba'@'10.%' IDENTIFIED BY '{{ password }}';
+              - grant alter, alter routine, create, create routine, create temporary tables, create user, create view, delete, drop, event, execute, index, insert, lock tables, process, references, reload, select, show databases, show view, trigger, update on *.* to '{{ target_user }}_dba'@'10.%' WITH GRANT OPTION;
+              - CREATE USER IF NOT EXISTS '{{ target_user }}_dba'@'192.%' IDENTIFIED BY '{{ password }}';
+              - grant alter, alter routine, create, create routine, create temporary tables, create user, create view, delete, drop, event, execute, index, insert, lock tables, process, references, reload, select, show databases, show view, trigger, update on *.* to '{{ target_user }}_dba'@'192.%' WITH GRANT OPTION;
+          loop: "{{ mysql_list }}"
+          when: mysql_list is defined
+          register: prod_mysql_list_output
+          no_log: true
+      rescue:
+        - name: send notification

@@ -1,0 +1,15 @@
+---
+- name: Flush Hosts for Target MySQL Instances/Clusters
+  hosts: all
+  tasks:
+    - block:
+        - name: Execute Flush Hosts on Target Instance(s)/Cluster(s)
+          community.mysql.mysql_query:
+            login_host: "{{ item }}"
+            login_user: "{{ db_username }}"
+            login_password: "{{ db_password }}"
+            query: "flush hosts;"
+          loop: "{{ mysql_targets }}"
+          register: flushed_hosts
+      rescue:
+        - name: send notification via teams email

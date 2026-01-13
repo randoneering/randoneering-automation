@@ -1,0 +1,131 @@
+---
+- name: Enforce DBA Settings
+  hosts: all
+  tasks:
+    - name: connect to Account
+      amazon.aws.sts_assume_role:
+        region: us-west-1
+        role_arn: ""
+        role_session_name: "enforce_dba"
+      register: assumed_role
+
+    - name: get rds instance details
+      amazon.aws.rds_instance_info:
+        region: us-west-2
+        access_key: "{{ assumed_role.sts_creds.access_key }}"
+        secret_key: "{{ assumed_role.sts_creds.secret_key }}"
+        session_token: "{{ assumed_role.sts_creds.session_token }}"
+      register: instance
+
+    - name: filter out docdb and aurora engines in instances
+      ansible.builtin.set_fact:
+        instances: "{{ instance.instances | selectattr('engine', 'search', '^(?!aurora|docdb)') }}"
+
+    - name: filter out stopped instances
+      ansible.builtin.set_fact:
+        instances_avail: "{{ instances | selectattr('db_instance_status', 'eq', 'available') }}"
+
+    - name: get rds cluster details
+      amazon.aws.rds_cluster_info:
+        region: us-east-1
+        access_key: "{{ assumed_role.sts_creds.access_key }}"
+        secret_key: "{{ assumed_role.sts_creds.secret_key }}"
+        session_token: "{{ assumed_role.sts_creds.session_token }}"
+      register: cluster
+
+    - name: filter out docdb in clusters
+      ansible.builtin.set_fact:
+        clusters: "{{ cluster.clusters | selectattr('engine', 'search', 'aurora') }}"
+
+    - name: filter out stopped clusters
+      ansible.builtin.set_fact:
+        clusters_avail: "{{ clusters | selectattr('status', 'eq', 'available') }}"
+
+    - name: get rds cluster instance details
+      amazon.aws.rds_cluster_info:
+        region: us-east-1
+        access_key: "{{ assumed_role.sts_creds.access_key }}"
+        secret_key: "{{ assumed_role.sts_creds.secret_key }}"
+        session_token: "{{ assumed_role.sts_creds.session_token }}"
+      register: cluster_instance
+
+    - name: filter out docdb in cluster instances
+      ansible.builtin.set_fact:
+        cluster_instances: "{{ cluster_instance.clusters | selectattr('engine', 'search', 'aurora') }}"
+
+    - name: filter out stopped cluster instances
+      ansible.builtin.set_fact:
+        cluster_instances_avail: "{{ cluster_instances | selectattr('status', 'eq', 'available') }}"
+
+    - block:
+        - name: enforce setting for clusters
+          amazon.aws.rds_cluster:
+            region: us-west-2
+            access_key: "{{ assumed_role.sts_creds.access_key }}"
+            secret_key: "{{ assumed_role.sts_creds.secret_key }}"
+            session_token: "{{ assumed_role.sts_creds.session_token }}"
+            id: "{{ item }}"
+            state: present
+            copy_tags_to_snapshot: true
+            deletion_protection: true
+            storage_encrypted: true
+            preferred_maintenance_window: "Thu:03:00-Thu:04:00"
+            purge_tags: false
+            apply_immediately: true
+            backup_retention_period: 14
+            tags:
+              owner: justin@randoneering.tech
+              DBIdentifier: "{{ item }}"
+          with_items: "{{ clusters_avail }}"
+          when: clusters_avail is defined
+          register: clusters_after
+        - name: enforce settings for target instances in clusters
+          amazon.aws.rds_instance:
+            region: us-west-2
+            access_key: "{{ assumed_role.sts_creds.access_key }}"
+            secret_key: "{{ assumed_role.sts_creds.secret_key }}"
+            session_token: "{{ assumed_role.sts_creds.session_token }}"
+            id: "{{ item }}"
+            state: present
+            auto_minor_version_upgrade: true
+            purge_tags: false
+            storage_encrypted: true
+            apply_immediately: true
+            monitoring_interval: 60
+            monitoring_role_arn: ""
+            preferred_maintenance_window: "Thu:03:00-Thu:04:00"
+            backup_retention_period: 14
+            backup_window: "06:00-07:00"
+            tags:
+              owner: justin@randoneering.tech
+              DBIdentifier: "{{ item }}"
+          with_items: "{{ cluster_instances_avail }}"
+          when: cluster_instances_avail is defined
+          register: cluster_instances_after
+        - name: enforce DBA settings for target instances
+          amazon.aws.rds_instance:
+            region: us-west-2
+            access_key: "{{ assumed_role.sts_creds.access_key }}"
+            secret_key: "{{ assumed_role.sts_creds.secret_key }}"
+            session_token: "{{ assumed_role.sts_creds.session_token }}"
+            id: "{{ item }}"
+            state: present
+            auto_minor_version_upgrade: true
+            copy_tags_to_snapshot: true
+            deletion_protection: true
+            purge_tags: false
+            storage_encrypted: true
+            apply_immediately: true
+            monitoring_interval: 60
+            monitoring_role_arn: ""
+            preferred_maintenance_window: "Thu:03:00-Thu:04:00"
+            backup_retention_period: 14
+            backup_window: "06:00-07:00" #In UTC
+            tags:
+              owner: justin@randoneering.tech
+              DBIdentifier: "{{ item }}"
+          with_items: "{{ instances_avail }}"
+          when: instances_avail is defined
+          register: instances_avail
+      rescue:
+        - name: send notification

@@ -1,0 +1,52 @@
+---
+- name: Mysql DB Initialization Script for New Instances
+  hosts: all
+  tasks:
+    - name: Create Sevice User
+      community.mysql.mysql_user:
+        login_host: "{{ target_db_instance }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        name: "{{ service_username }}"
+        host: "{{ item.host }}"
+        password: "{{ service_username_password }}"
+        priv: |
+          {{ target_db_name }}.*: SELECT, ALTER, CREATE, CREATE TEMPORARY TABLES, CREATE VIEW, DELETE, DROP, EXECUTE, INSERT, SHOW VIEW, TRIGGER, UPDATE, USAGE, LOAD FROM S3
+      with_items:
+        - { host: "172.%" }
+        - { host: "192.%" }
+        - { host: "10.%" }
+
+    - name: Create DBA target_db_name
+      community.mysql.mysql_db:
+        login_host: "{{ target_db_instance }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        name: "dba"
+
+    - name: Create DBA/Admin Users
+      community.mysql.mysql_user:
+        login_host: "{{ target_db_instance }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        name: "{{ item.name }}"
+        host: "{{ item.host }}"
+        password: "{{ item.password }}"
+        priv: "*.*:GRANT, SELECT, CREATE, CREATE TEMPORARY TABLES, CREATE VIEW, UPDATE, INSERT, ALTER, DELETE, DROP, EXECUTE, SHOW DATABASES, TRIGGER, SHOW VIEW, ALTER ROUTINE, CREATE ROUTINE, CREATE USER, EVENT, INDEX, LOCK TABLES, PROCESS, REFERENCES, RELOAD"
+      with_items:
+        - {
+            host: "172.%",
+            name: "randoneering",
+            password: "{{ randoneering_password }}",
+          }
+        - {
+            host: "10.%",
+            name: "randoneering",
+            password: "{{ randoneering_password }}",
+          }
+        - {
+            host: "192.%",
+            name: "randoneering",
+            password: "{{ randoneering_password }}",
+          }
+      no_log: false

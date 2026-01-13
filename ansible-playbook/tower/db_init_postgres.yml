@@ -1,0 +1,184 @@
+---
+- name: DB Initialization for New Instance
+  hosts: all
+  tasks:
+    - name: Create DBA role
+      community.postgresql.postgresql_query:
+        login_host: "{{ target_db_instance }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ target_db_name }}"
+        query:
+          - do $block$
+            declare
+            _missing bool;
+            begin
+            select (count(*) filter (where rolname = 'dba')) = 0 into strict _missing from pg_roles;
+            if _missing then
+            create role dba CREATEDB CREATEROLE LOGIN;
+            grant rds_superuser to dba;
+            end if
+            ;
+            end;
+            $block$;
+
+    - name: Create svc_ansible_user
+      community.postgresql.postgresql_user:
+        login_host: "{{ target_db_instance }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ target_db_name }}"
+        name: "svc_ansible_user"
+        password: "{{ svc_ansible_password }}"
+      no_log: true
+
+    - name: Create DBA Schema
+      community.postgresql.postgresql_query:
+        login_host: "{{ target_db_instance }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ target_db_name }}"
+        query:
+          - grant dba to randoneering, svc_ansible_user;
+          - create schema if not exists dba authorization dba;
+          - revoke dba from randoneering, svc_ansible_user;
+
+    - name: Create readonly and readwrite roles
+      community.postgresql.postgresql_query:
+        login_host: "{{ target_db_instance }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ target_db_name }}"
+        query:
+          - do $block$
+            declare
+            _missing bool;
+            begin
+            select (count(*) filter (where rolname = 'readonly')) = 0 into strict _missing from pg_roles;
+            if _missing then
+            create role readonly nologin;
+            end if
+            ;
+            end;
+            $block$;
+          - do $block$
+            declare
+            _missing bool;
+            begin
+            select (count(*) filter (where rolname = 'readwrite')) = 0 into strict _missing from pg_roles;
+            if _missing then
+            create role readwrite nologin;
+            end if
+            ;
+            end;
+            $block$;
+        named_args:
+          service_username: "{{ service_username }}"
+
+    - name: Create Schema and service_user
+      community.postgresql.postgresql_query:
+        login_host: "{{ target_db_instance }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ target_db_name }}"
+        query:
+          - do $block$
+            declare
+            _missing bool;
+            begin
+            select (count(*) filter (where usename = '{{ service_username }}')) = 0 into strict _missing from pg_user;
+            if _missing then
+            create user {{ service_username }} with password '{{ service_username_password }}';
+            grant  {{ service_username }} to dba;
+            grant {{ service_username }} to {{ db_username }};
+            else
+            alter user {{ service_username }} with password '{{ service_username_password }}';
+            grant {{ service_username }} to {{ db_username }};
+            end if
+            ;
+            end;
+            $block$
+            ;
+          - create schema if not exists {{ schema_name }} authorization {{ service_username }}
+          - grant {{ service_username }} to svc_ansible_user
+          - alter user {{ service_username }} set search_path to {{ schema_name }}
+        named_args:
+          service_username: "{{ service_username }}"
+          service_username_password: "{{ service_username_password }}"
+
+    - name: Rights for Service User
+      community.postgresql.postgresql_query:
+        login_host: "{{ target_db_instance }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ target_db_name }}"
+        query:
+          - alter database "{{ target_db_name }}" owner to {{ service_username }};
+          - grant connect on database "{{ target_db_name }}" to {{ service_username }};
+          - grant usage on schema {{ schema_name }} to {{ service_username }};
+          - grant create on database "{{ target_db_name }}" to {{ service_username }};
+          - grant execute on all functions in schema {{ schema_name }} to {{ service_username }};
+          - grant execute on all procedures in schema {{ schema_name }} to {{ service_username }};
+          - grant all privileges on all sequences in schema {{ schema_name }} to {{ service_username }};
+          - grant select, insert, update, truncate, delete on all tables in schema {{ schema_name }} to {{ service_username }};
+        named_args:
+          service_username: "{{ service_username }}"
+
+    - name: Grant privileges to readonly and readwrite user
+      community.postgresql.postgresql_query:
+        login_host: "{{ target_db_instance }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ target_db_name }}"
+        query:
+          - grant usage on schema {{ schema_name }} to readonly, readwrite;
+          - grant select on all tables in schema {{ schema_name }} to readonly, readwrite;
+          - grant insert, update, delete on all tables in schema {{ schema_name }} to readwrite;
+          - grant all privileges on all sequences in schema {{ schema_name }} to readwrite;
+          - grant execute on all functions in schema {{ schema_name }} to readwrite;
+
+    - name: Set default privileges for Application user and roles
+      community.postgresql.postgresql_query:
+        login_host: "{{ target_db_instance }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ target_db_name }}"
+        query:
+          - alter default privileges for user {{service_username}} grant select on tables to readonly;
+          - alter default privileges for user {{service_username}} grant usage on sequences to readonly;
+          - alter default privileges for user {{service_username}} grant usage on types to readonly;
+          - alter default privileges for user {{ service_username }} grant select,insert,update,delete on tables to readwrite;
+          - alter default privileges for user {{ service_username }} grant all privileges on sequences to readwrite;
+          - alter default privileges for user {{ service_username }} grant execute on functions to readwrite;
+          - alter default privileges for user {{ service_username }} grant usage on types to readwrite;
+          - grant {{ service_username }} to dba;
+          - revoke {{ service_username }} from randoneering;
+        named_args:
+          service_username: "{{ service_username }}"
+
+    - name: Create dba users
+      community.postgresql.postgresql_user:
+        login_host: "{{ target_db_instance }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ target_db_name }}"
+        name: "{{ item.name }}"
+        password: "{{ item.password }}"
+      with_items:
+        - {
+            name: "randoneering_dba",
+            password: "{{ randoneering_dba_password }}",
+          }
+      no_log: true
+
+    - name: Grant dba rights to dba user
+      community.postgresql.postgresql_membership:
+        login_host: "{{ target_db_instance }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: "{{ target_db_name }}"
+        groups: "dba"
+        target_role: "{{ item.name }}"
+      with_items:
+        - { name: "randoneering_dba" }
+        - { name: "svc_ansible_user" }

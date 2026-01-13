@@ -1,0 +1,41 @@
+---
+- name: Scheduled Drop of Target User
+  hosts: all
+  tasks:
+    - name: Drop target user for postgres
+      community.postgresql.postgresql_query:
+        login_host: "{{ host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        db: postgres
+        query:
+          - DROP USER IF EXISTS {{ item }}
+      with_items: "{{ target_users }} "
+      when: target_engine == "postgres"
+      register: dropped_user
+
+    - name: Drop target user for mysql
+      community.mysql.mysql_query:
+        login_host: "{{ host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        query:
+          - DROP USER IF EXISTS {{ item }}
+      with_items: "{{ target_users }} "
+      when: target_engine == "mysql"
+      register: dropped_user
+
+    - name: Drop target user for docdb
+      community.mongodb.mongodb_shell:
+        login_host: "{{ host }}"
+        login_user: "{{ db_username }}"
+        login_password: "{{ db_password }}"
+        login_port: 27017
+        ssl: true
+        ssl_ca_certs: /mnt/datadogfiles/global-bundle.pem
+        stringify: false
+        eval: |
+          db.dropUser('{{ item }}');
+      with_items: "{{ target_users }} "
+      when: target_engine == "docdb"
+      register: dropped_user
