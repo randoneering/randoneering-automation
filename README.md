@@ -383,7 +383,7 @@ This is an internal automation project for Randoneering infrastructure. For ques
 
 ## License
 
-Internal use only. All rights reserved.
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
 
 ## Roadmap
 
